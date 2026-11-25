@@ -10,5 +10,5 @@ frontend/node_modules/
 frontend/dist/
 frontend/.angular/
 .DS_Store
-Take_Home_Exercise.*
-01a_trace.csv
+/Take_Home_Exercise.*
+/01a_trace.csv
