@@ -190,8 +190,11 @@ class Broker:
         return team if self._isolated(team) else "*"
 
     def wants_interruptible(self, job: Job) -> bool:
+        limit = self.config.interruptible_max_estimate_minutes
         return (self.config.interruptible_for_low and job.priority == "low"
-                and not job.no_interruptible and self.effective_priority(job) == 0)
+                and not job.no_interruptible
+                and (limit is None or job.estimated_minutes <= limit)
+                and self.effective_priority(job) == 0)
 
     def _pool(self, job: Job) -> Pool:
         return (self.wants_interruptible(job), self._tenancy(job.team))

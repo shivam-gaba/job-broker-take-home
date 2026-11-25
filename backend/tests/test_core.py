@@ -307,6 +307,15 @@ def test_low_priority_runs_on_interruptible_and_is_requeued_on_reclaim():
     assert rep["total_cost"] == pytest.approx(b.provider.invoice(), abs=0.02)
 
 
+def test_long_low_priority_jobs_stay_on_demand():
+    b = make()
+    b.submit("vision", 1, 240, priority="low")  # estimate above the 120-min limit
+    assert not next(iter(b.alive.values())).interruptible
+    b2 = make(Config(interruptible_max_estimate_minutes=None))
+    b2.submit("vision", 1, 240, priority="low")
+    assert next(iter(b2.alive.values())).interruptible
+
+
 def test_interruptible_can_be_disabled():
     b = make(Config(interruptible_for_low=False))
     b.submit("vision", 1, 60, priority="low")

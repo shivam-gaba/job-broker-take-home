@@ -31,7 +31,7 @@ Job object:
 `effective_priority` (0 low .. 2 high) includes aging; only set while queued.
 `wait_minutes` is submit to *first* start. `interruptions` counts reclaims of interruptible
 nodes under the job (it was re-queued and rerun on-demand). `runs_on_interruptible`: for a
-queued job, whether it will be placed on an interruptible node (low priority, not yet aged,
+queued job, whether it will be placed on an interruptible node (low priority, estimate <= 120 min, not yet aged,
 never interrupted); for a started job, whether its node is interruptible.
 
 ### `GET /api/jobs?status=&team=&limit=200` — list (newest first)

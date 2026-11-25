@@ -26,9 +26,9 @@ Requirements: Python 3.10+ and Node 18+ (Node is only needed for the UI).
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pytest -q                                   # 38 tests, a few seconds
+pytest -q                                   # 39 tests, a few seconds
 
-# trace replay (8 policy variants x 5 provider seeds, ~10 s)
+# trace replay (9 policy variants x 5 provider seeds, ~10 s)
 python -m broker.replay ../data/01a_trace.csv --seeds 5 --out ../docs/replay_results.md
 
 # API on :8000 (state in backend/var/, survives restarts)
@@ -74,7 +74,7 @@ Simulated time only moves when you click **+1m / +5m / +15m / +60m** in the UI o
 - **Idle reaper (requirement 3).** A node with no jobs for N minutes is terminated (N defaults to 10, configurable). The first 10 minutes of a node are paid for anyway (billing minimum), so a node is never reaped before `launched_at + 10 min`.
 
 ### Interruptible nodes
-- **Who uses them.** Low-priority jobs run on interruptible nodes at 35% of the price. Interruptible and on-demand jobs never share a node.
+- **Who uses them.** Low-priority jobs with an estimate of **120 minutes or less** run on interruptible nodes at 35% of the price (`interruptible_max_estimate_minutes`). Longer low jobs go on-demand, because a reclaim restarts a job from scratch. Interruptible and on-demand jobs never share a node.
 - **Reclaim notice.** On the 2-minute notice the node stops taking new jobs. Without checkpointing, 2 minutes isn't enough to save any work.
 - **On reclaim.** Running jobs go back to the queue with their original submit time, so they keep their place. They rerun from scratch, **on on-demand nodes**. A job is never interrupted twice.
 - **Aging.** A low job that has waited long enough to age past low also moves to on-demand. So when spot capacity is short, low-priority work still gets done.
@@ -142,37 +142,42 @@ Full tables: [docs/replay_results.md](docs/replay_results.md). These are means o
 
 | | fair (chosen) | fifo |
 |---|---|---|
-| Total cost | 2,875 (seed range 2,736-3,086) | **2,788** (2,745-2,831) |
-| p50 / p90 / p99 wait, all jobs | 6.6 / 98 / 148 min | 6.5 / **80 / 100** min |
-| platform p90 / p99 | **7.8 / 70 min** | 39 / 83 min |
-| speech p90 / p99 | **20.5** / 58.6 min | 22.8 / 57.8 min |
-| vision p50 / p90 | 38.7 / 123 min | **34.2 / 87** min |
-| nlp p99 | 62.5 min | **16.0** min |
-| high-priority p90 | 7.7 min | 7.5 min |
+| Total cost | 2,942 (seed range 2,785-3,060) | **2,872** (2,825-2,922) |
+| p50 / p90 / p99 wait, all jobs | 6.8 / 97 / 152 min | **6.2 / 76 / 102** min |
+| platform p90 / p99 | **7.3 / 40 min** | 26 / 69 min |
+| speech p90 / p99 | **15.4** / 66 min | 23.5 / **54** min |
+| vision p50 / p90 | 39.6 / 117 min | **34.8 / 86** min |
+| nlp p99 | 32 min | **16** min |
+| high-priority p90 | 7.7 min | 7.6 min |
 
 Other variants (full table in `docs/replay_results.md`):
 
 | variant | cost | p90 wait | started ≤10 min | note |
 |---|---|---|---|---|
-| fair (chosen) | 2,875 | 98 | 61% | |
-| every team isolated | 2,833 | 124 | 53% | about 20% more launches |
-| no interruptible nodes | 3,011 | 105 | 63% | spot saves about 4.5% |
-| no reserved high slot | 2,819 | 75 | 64% | high p90 7.6 vs 7.7 |
-| reaper N=0 / N=30 | 2,770 / 3,012 | 90 / 106 | 59% / 60% | |
-| no right-sizing | 2,923 | 75 | 65% | |
+| fair (chosen) | 2,942 | 97 | 60% | 4.2 reclaims, 17.5 GPU-h lost per week |
+| fair without draining | 2,831 | – | – | platform p99 79, speech p90 29, nlp p99 16 |
+| every team isolated | 2,913 | 119 | 55% | about 17% more launches |
+| no interruptible nodes | 3,011 | 105 | 63% | |
+| spot for every low job (no 120-min limit) | 2,875 | 98 | 61% | 6.2 reclaims, 40 GPU-h lost |
+| no reserved high slot | 2,964 | 86 | 62% | high p90 8.0 |
+| reaper N=0 / N=30 | 2,791 / 3,043 | 97 / 99 | 59% / 60% | |
+| no right-sizing | 3,049 | 80 | 64% | |
 
 **Analysis**
 - **Fair-share is a trade-off, not a free win, now that teams share nodes.**
-  - What it buys: platform's p90 drops from 39 to 8 minutes, because occasional submitters no longer queue behind vision's sweep. Draining specifically improves speech's p99 (69 → 59 vs fair without draining) and platform's p90 (16 → 8).
-  - Who pays: vision's burst. Its p90 rises from 87 to 123 minutes, and vision is more than half of all jobs, so the all-jobs p90 looks worse than FIFO.
-  - Unexplained: nlp's p99 is also worse under fair. I suspect aged vision jobs competing at "high" effective priority, but I haven't confirmed it.
-  - I'd still choose fair. Worst-case waits for small teams matter more than the median of one team's batch sweep. A sweep that size should be submitted at low priority.
-- **The vision tail is a capacity problem.** On 03-05 at 06:10, vision submitted about 230 one-GPU, 30-minute jobs in 5 minutes, about 119 GPU-hours. The 10-node cap gives at most 80 GPUs, so it takes at least 90 minutes under any policy. Excluding vision, 84-94% of each team's jobs start within 10 minutes.
-- **The reserved high slot doesn't pay off on this trace.** High-priority p90 is 7.7 minutes with it and 7.6 without. High jobs (nlp, forecast) arrive in the afternoon, when the cluster is rarely full, while the slot costs vision's burst one of its 10 nodes (overall p90 98 vs 75). It's insurance against a high job arriving into a full cluster; on this trace it never paid out. Turning it off is `high_reserved_slots=0`.
-- **Interruptible nodes save about 4.5%** (3,011 → 2,875), with about 6 reclaims a week and about 40 GPU-hours of lost work. They also widen the cost spread between seeds. The losses come from long low-priority jobs that badly overran their estimates, for example platform's 2,783-minute job estimated at 240: reclaiming one of those means rerunning hours of work. Next step: only send low jobs with an estimate under about 2 hours to spot.
-- **Isolating everyone is cheaper but slower.** Making every team isolated costs about the same (2,833) but cuts on-time starts from 61% to 53%. Opt-in isolation keeps that cost to the teams that need it.
-- **Where the idle money goes.** The idle pool is about 28% of the bill. The largest part is **unused GPUs on busy nodes** (450-760 per week, depending on seed), not idle nodes: boot is about 85 and idle-before-reap about 125. Under single-team attribution this waste was hidden inside each team's busy cost. Now Finance can see it, and it points at node sizing and packing as the lever, more than the reaper.
-- **Reaper N** stays at 10: N=0 is about 3.5% cheaper but drops on-time starts; N=30 is 5% more expensive with no latency benefit.
+  - Fair ordering plus draining protects teams that submit occasionally. Platform's p90 drops from 26 to 7 minutes and its p99 from 69 to 40; speech's p90 drops from 23.5 to 15.
+  - The price is paid by the big queues. Vision's burst p90 rises from 86 to 117 minutes, and vision is more than half of all jobs, so the all-jobs numbers look worse than FIFO. Total cost is about 2% higher.
+  - **Draining is most of that trade.** Compared with fair ordering without draining, draining cuts platform's p99 from 79 to 40 and speech's p90 from 29 to 15. But it costs about 4% (2,831 → 2,942), stretches vision's p90 (96 → 117), and doubles nlp's p99 (16 → 32): a drained node waits for one blocked team while others queue.
+  - I'd still choose fair with draining, because the worst case for small teams matters more than one team's sweep. But it is a reasonable thing to argue about, and `drain=False` is one switch.
+- **The vision tail is a capacity problem.** On 03-05 at 06:10, vision submitted about 230 one-GPU, 30-minute jobs in 5 minutes, about 119 GPU-hours. The 10-node cap gives at most 80 GPUs, so it takes at least 90 minutes under any policy. Excluding vision, 83-95% of each team's jobs start within 10 minutes. A sweep that size should be submitted at low priority.
+- **The reserved high slot is insurance with a small payout here.** High-priority p90 is 7.7 minutes with it and 8.0 without. High jobs (nlp, forecast) arrive in the afternoon, when the cluster is rarely full, and the slot costs vision's burst one of its 10 nodes (overall p90 97 vs 86). I kept it because it protects against a high job arriving into a full cluster, which this trace barely exercises.
+- **Interruptible nodes.**
+  - With the 120-minute estimate limit they save about 2.3% (3,011 → 2,942) at about 4 reclaims and 17.5 GPU-hours of lost work a week.
+  - Without the limit they save about 4.5%, but lose 40 GPU-hours. Most of that comes from long low-priority jobs that badly overran their estimates, for example platform's 2,783-minute job estimated at 240, where a reclaim means rerunning hours of work.
+  - The limit trades half the savings for less than half the wasted work and fewer surprise reruns, which is the better deal for the people waiting on those jobs.
+- **Isolating everyone costs about the same** (2,913) but cuts on-time starts from 60% to 55%. Opt-in isolation keeps that cost to the teams that need it.
+- **Where the idle money goes.** The idle pool is about 29% of the bill. The largest part is **unused GPUs on busy nodes** (roughly 450-760 per week, depending on seed), not idle nodes: boot is about 85 and idle-before-reap about 125. Under single-team attribution this waste was hidden inside each team's busy cost. Now Finance can see it, and it points at node sizing and packing as the lever, more than the reaper.
+- **Reaper N** stays at 10. N=0 is about 5% cheaper but drops on-time starts by a point and relaunches more often (more exposure to capacity errors). N=30 costs 3% more with no latency benefit. N=0 is a defensible Finance-first setting.
 
 ## Assumptions
 - `actual_minutes` for failed and cancelled rows is time spent *running*. The job then ends in that state.
@@ -184,7 +189,7 @@ Other variants (full table in `docs/replay_results.md`):
 - Time is integer seconds since the epoch, UTC. The API speaks ISO-8601.
 
 ## What I cut, and what I'd do next
-- **Smarter interruptible use.** Only send short low jobs to spot (estimate under about 2 hours). Let jobs opt in or out. Use checkpoints, once jobs support them, to make reclaims cheap.
+- **Smarter interruptible use.** Let jobs opt in or out explicitly. Use checkpoints, once jobs support them, to make reclaims cheap. Base the estimate limit on each team's history of overruns, not one number.
 - **Isolation premium.** Charge isolated teams for the unused GPUs on their nodes instead of pooling them.
 - **Runtime watchdog.** Kill or flag jobs running more than about 4× their estimate. The 48-hour speech job cost about 408 on its own, roughly 14% of the week's bill.
 - **Preemption for high priority**, once jobs can checkpoint.

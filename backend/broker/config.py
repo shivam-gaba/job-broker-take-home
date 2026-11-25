@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 
 @dataclass
@@ -30,6 +31,9 @@ class Config:
     # their jobs are re-queued and rerun on on-demand nodes. A low job that has
     # aged to a higher effective priority also moves to on-demand.
     interruptible_for_low: bool = True
+    # ...but only if the estimate is at most this long (None = no limit). A
+    # reclaim restarts the job from scratch, so long jobs are a bad bet.
+    interruptible_max_estimate_minutes: Optional[float] = 120
     # "demand": size a new node for the team's queued demand (pack small jobs)
     # "smallest": smallest node type that fits the job
     sizing: str = "demand"

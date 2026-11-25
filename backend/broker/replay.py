@@ -24,12 +24,15 @@ from .provider import FakeProvider
 from .trace import TraceRow, load_trace
 
 VARIANTS: list[tuple[str, str, Config]] = [
-    ("fair", "Chosen policy: fair-share + aging + draining; teams share nodes; low priority on "
-             "interruptible; 1 slot reserved for high; demand sizing; reaper 10 min", Config()),
+    ("fair", "Chosen policy: fair-share + aging + draining; teams share nodes; low priority "
+             "with estimate <= 120 min on interruptible; 1 slot reserved for high; demand "
+             "sizing; reaper 10 min", Config()),
     ("fifo", "Alternative: strict priority then FIFO, no draining (everything else equal)",
      Config(ordering="fifo", drain=False)),
     ("fair-isolated", "Every team isolated (prices the Security request)", Config(isolation=True)),
     ("fair-no-spot", "No interruptible nodes", Config(interruptible_for_low=False)),
+    ("fair-spot-all", "Interruptible for every low job, no estimate limit",
+     Config(interruptible_max_estimate_minutes=None)),
     ("fair-no-reserve", "No reserved high-priority slot", Config(high_reserved_slots=0)),
     ("fair-reaper0", "Reaper N=0 (kill as soon as idle, after the paid 10 min)",
      Config(reaper_idle_minutes=0)),
