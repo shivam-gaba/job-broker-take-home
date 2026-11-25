@@ -548,7 +548,11 @@ class Broker:
 
     # ============================================================ reports
     def cost_report(self, start: Optional[int] = None, end: Optional[int] = None) -> dict:
-        lo = 0 if start is None else start
+        if start is None:
+            first = [n.launched_at for n in self.nodes.values()] + [
+                j.submitted_at for j in self.jobs.values()]
+            start = min(first, default=self.now)
+        lo = start
         hi = self.now if end is None else min(end, self.now)
         segs = list(self.segments) + [
             Segment(n.id, n.team, n.seg_kind, n.seg_start, self.now, n.price_per_hour)

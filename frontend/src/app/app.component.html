@@ -1,0 +1,216 @@
+<header class="top">
+  <div>
+    <h1>Job Broker</h1>
+    <span class="muted">Shared GPU pool · simulated clock</span>
+  </div>
+  @if (summary(); as s) {
+    <div class="clock">
+      <span class="muted">Sim time (UTC)</span>
+      <strong>{{ s.now | date: 'EEE MMM d, HH:mm:ss' : 'UTC' }}</strong>
+    </div>
+    <div class="advance">
+      <span class="muted">Advance</span>
+      @for (m of [1, 5, 15, 60]; track m) {
+        <button (click)="advance(m)" [disabled]="busy()">+{{ m }}m</button>
+      }
+    </div>
+  }
+</header>
+
+@if (error()) {
+  <div class="banner error">{{ error() }}</div>
+}
+@if (message()) {
+  <div class="banner info">{{ message() }}</div>
+}
+
+@if (summary(); as s) {
+  <section class="tiles">
+    <div class="tile"><span class="muted">Queued</span><strong>{{ s.queued }}</strong></div>
+    <div class="tile"><span class="muted">Running</span><strong>{{ s.running }}</strong></div>
+    <div class="tile"><span class="muted">Nodes</span><strong>{{ s.nodes_alive }} / {{ s.max_nodes }}</strong></div>
+    <div class="tile"><span class="muted">GPUs in use</span><strong>{{ s.gpus_used }} / {{ s.gpus_total }}</strong></div>
+    <div class="tile"><span class="muted">Total cost</span><strong>{{ cost()?.total_cost | number: '1.2-2' }}</strong></div>
+    <div class="tile"><span class="muted">Idle share</span>
+      <strong>{{ (cost()?.total_cost ? (cost()!.total_idle_cost / cost()!.total_cost) : 0) | percent: '1.0-0' }}</strong>
+    </div>
+  </section>
+  @if ((s.backoff_until | keyvalue).length) {
+    <div class="banner warn">
+      Provider capacity problems, backing off:
+      @for (b of s.backoff_until | keyvalue; track b.key) {
+        <span class="pill">{{ b.key }} until {{ b.value | date: 'HH:mm' : 'UTC' }}</span>
+      }
+      Queued jobs keep waiting; other node types are tried meanwhile.
+    </div>
+  }
+}
+
+<main class="grid">
+  <!-- submit -->
+  <section class="card">
+    <h2>Submit a job</h2>
+    <form (ngSubmit)="submit()" class="submit">
+      <label>Team <input name="team" [(ngModel)]="form.team" required maxlength="64" /></label>
+      <label>GPUs
+        <select name="gpus" [(ngModel)]="form.gpus">
+          @for (g of gpuOptions; track g) { <option [ngValue]="g">{{ g }}</option> }
+        </select>
+      </label>
+      <label>Estimate (min) <input name="est" type="number" min="1" [(ngModel)]="form.estimated_minutes" required /></label>
+      <label>Priority
+        <select name="prio" [(ngModel)]="form.priority">
+          @for (p of priorities; track p) { <option [value]="p">{{ p }}</option> }
+        </select>
+      </label>
+      <label title="Simulation only: how long the job really runs. Defaults to the estimate.">
+        Actual runtime (min, sim)
+        <input name="run" type="number" min="0" [(ngModel)]="form.simulated_runtime_minutes" placeholder="= estimate" />
+      </label>
+      <button type="submit" class="primary" [disabled]="busy() || !form.team.trim()">Submit</button>
+    </form>
+  </section>
+
+  <!-- nodes -->
+  <section class="card wide">
+    <h2>Nodes <span class="muted">({{ nodes().length }} alive)</span></h2>
+    @if (nodes().length === 0) {
+      <p class="muted">No nodes running. Submitting a job launches one.</p>
+    }
+    <div class="nodes">
+      @for (n of nodes(); track n.id) {
+        <div class="node" [class]="'node ' + nodeStatus(n)">
+          <div class="node-head">
+            <strong>{{ n.id }}</strong>
+            <span class="pill">{{ n.type }}</span>
+            <span class="pill status">{{ nodeStatus(n) }}</span>
+          </div>
+          <div class="gpus">
+            @for (used of gpuSlots(n); track $index) {
+              <span class="gpu" [class.used]="used"></span>
+            }
+          </div>
+          <div class="node-meta">
+            <span>team <strong>{{ n.team }}</strong></span>
+            <span>{{ n.used_gpus }}/{{ n.gpus }} GPUs</span>
+            <span>{{ n.price_per_hour | number: '1.2-2' }}/h · so far {{ n.cost_so_far | number: '1.2-2' }}</span>
+            @if (n.idle_since) {
+              <span class="muted">idle since {{ n.idle_since | date: 'HH:mm' : 'UTC' }}</span>
+            }
+          </div>
+        </div>
+      }
+    </div>
+  </section>
+
+  <!-- queue -->
+  <section class="card wide">
+    <h2>Queue <span class="muted">(scheduler order)</span></h2>
+    @if (queue().length === 0) {
+      <p class="muted">Queue is empty.</p>
+    } @else {
+      <table>
+        <thead>
+          <tr><th>#</th><th>Job</th><th>Team</th><th>GPUs</th><th>Est.</th><th>Priority</th><th>Waiting</th><th></th></tr>
+        </thead>
+        <tbody>
+          @for (j of queue(); track j.id; let i = $index) {
+            <tr>
+              <td>{{ i + 1 }}</td>
+              <td class="mono">{{ j.id }}</td>
+              <td>{{ j.team }}</td>
+              <td>{{ j.gpus }}</td>
+              <td>{{ j.estimated_minutes }}m</td>
+              <td>
+                <span class="prio" [class]="'prio ' + j.priority">{{ j.priority }}</span>
+                @if (j.effective_priority !== null && priorityLabel(j.effective_priority) !== j.priority) {
+                  <span class="muted" title="aged after waiting">→ {{ priorityLabel(j.effective_priority) }}</span>
+                }
+              </td>
+              <td [class.warn]="(j.wait_minutes ?? 0) > 10">{{ j.wait_minutes }}m</td>
+              <td><button class="link" (click)="cancel(j)">cancel</button></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  </section>
+
+  <!-- cost -->
+  <section class="card wide">
+    <h2>Cost by team</h2>
+    <form class="window" (ngSubmit)="applyCostWindow()">
+      <label>From (UTC) <input type="datetime-local" name="cs" [(ngModel)]="costStart" /></label>
+      <label>To (UTC) <input type="datetime-local" name="ce" [(ngModel)]="costEnd" /></label>
+      <button type="submit">Apply</button>
+      <button type="button" class="link" (click)="clearCostWindow()">all time</button>
+    </form>
+    @if (cost(); as c) {
+      <table>
+        <thead>
+          <tr><th>Team</th><th>Jobs</th><th>GPU-hours</th><th>Busy cost</th><th>Idle cost</th><th>Total</th><th>Idle share</th></tr>
+        </thead>
+        <tbody>
+          @for (t of teamsInCost(); track t.team) {
+            <tr [title]="'boot/idle/minimum breakdown: ' + (t.breakdown | json)">
+              <td>{{ t.team === '_overhead' ? 'overhead (failed launches)' : t.team }}</td>
+              <td>{{ t.jobs }}</td>
+              <td>{{ t.gpu_hours | number: '1.2-2' }}</td>
+              <td>{{ t.busy_cost | number: '1.2-2' }}</td>
+              <td>{{ t.idle_cost | number: '1.2-2' }}</td>
+              <td><strong>{{ t.total_cost | number: '1.2-2' }}</strong></td>
+              <td>{{ t.idle_share | percent: '1.0-0' }}</td>
+            </tr>
+          } @empty {
+            <tr><td colspan="7" class="muted">No cost in this window.</td></tr>
+          }
+        </tbody>
+        <tfoot>
+          <tr>
+            <td>Total</td><td></td>
+            <td>{{ c.total_gpu_hours | number: '1.2-2' }}</td>
+            <td>{{ c.total_cost - c.total_idle_cost | number: '1.2-2' }}</td>
+            <td>{{ c.total_idle_cost | number: '1.2-2' }}</td>
+            <td><strong>{{ c.total_cost | number: '1.2-2' }}</strong></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+      <p class="muted small">
+        Window {{ c.start | date: 'MMM d HH:mm' : 'UTC' }} – {{ c.end | date: 'MMM d HH:mm' : 'UTC' }} UTC.
+        Idle cost (boot, idle, 10-minute minimum) is charged to the team the node was serving; nodes never mix teams.
+        Provider invoice to date: {{ c.provider_invoice_to_date | number: '1.2-2' }}.
+      </p>
+    }
+  </section>
+
+  <!-- recent jobs -->
+  <section class="card wide">
+    <h2>Recent jobs</h2>
+    <table>
+      <thead>
+        <tr><th>Job</th><th>Team</th><th>GPUs</th><th>Status</th><th>Submitted</th><th>Wait</th><th>Node</th><th></th></tr>
+      </thead>
+      <tbody>
+        @for (j of recentJobs(); track j.id) {
+          <tr>
+            <td class="mono">{{ j.id }}</td>
+            <td>{{ j.team }}</td>
+            <td>{{ j.gpus }}</td>
+            <td><span class="status-pill" [class]="'status-pill ' + j.status">{{ j.status }}</span></td>
+            <td>{{ j.submitted_at | date: 'MMM d HH:mm' : 'UTC' }}</td>
+            <td>{{ j.wait_minutes ?? '–' }}{{ j.wait_minutes !== null ? 'm' : '' }}</td>
+            <td class="mono">{{ j.node_id ?? '–' }}</td>
+            <td>
+              @if (j.status === 'running') {
+                <button class="link" (click)="cancel(j)">cancel</button>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <tr><td colspan="8" class="muted">Nothing has started yet.</td></tr>
+        }
+      </tbody>
+    </table>
+  </section>
+</main>
