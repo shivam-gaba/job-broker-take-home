@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.db
+*.db-journal
+provider_state*.json
+var/
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+.DS_Store
+Take_Home_Exercise.*
+01a_trace.csv
