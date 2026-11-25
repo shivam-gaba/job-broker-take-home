@@ -64,7 +64,7 @@ def test_jobs_share_a_node_of_the_same_team():
 
 
 def test_isolation_never_mixes_teams_on_a_node():
-    b = make()
+    b = make(Config(isolation=True))
     b.submit("vision", 2, 60)
     boot(b)  # vision has a gpu-m with 2 free GPUs
     b.submit("nlp", 1, 60)
@@ -74,12 +74,25 @@ def test_isolation_never_mixes_teams_on_a_node():
     assert len(b.alive) == 2
 
 
-def test_without_isolation_teams_share():
-    b = make(Config(isolation=False))
+def test_teams_share_nodes_by_default():
+    b = make()
     b.submit("vision", 2, 60)
     boot(b)
     b.submit("nlp", 1, 60)
     assert len(b.alive) == 1 and len(b.running) == 2
+
+
+def test_isolated_team_opt_in():
+    b = make(Config(isolated_teams=("secure",)))
+    b.submit("vision", 2, 60)
+    boot(b)  # gpu-m, 2 GPUs free
+    b.submit("nlp", 1, 60)  # shares with vision
+    s, _ = b.submit("secure", 1, 60)  # must not share
+    boot(b)
+    assert b.nodes[s.node_id].job_ids == [s.id]
+    assert len({b.jobs[j].team for j in b.nodes[b.jobs["j-000001"].node_id].job_ids}) == 2
+    later, _ = b.submit("nlp", 1, 60)
+    assert b.jobs[later.id].node_id != s.node_id  # nobody joins the isolated team's node
 
 
 def test_empty_node_is_reused_by_another_team():
@@ -91,15 +104,28 @@ def test_empty_node_is_reused_by_another_team():
     assert job.status == "running" and len(b.nodes) == 1
 
 
-def test_node_cap_is_respected():
+def test_node_cap_is_respected_with_one_slot_reserved_for_high():
     b = make()
     for _ in range(15):
         b.submit("vision", 8, 60)
-    assert len(b.alive) == 10
+    assert len(b.alive) == 9  # slot 10 is reserved for high priority
     boot(b)
-    assert len(b.running) == 10 and len(b.queue) == 5
+    assert len(b.running) == 9 and len(b.queue) == 6
+    high, _ = b.submit("nlp", 4, 60, priority="high")
+    assert len(b.alive) == 10
+    reserved = next(n for n in b.alive.values() if n.reserved)
+    boot(b)
+    assert high.node_id == reserved.id
+    assert reserved.job_ids == [high.id]  # normal jobs may not fill the reserved node
     b.run_until_idle()
     assert all(j.status == "succeeded" for j in b.jobs.values())
+
+
+def test_reserved_slot_disabled():
+    b = make(Config(high_reserved_slots=0))
+    for _ in range(15):
+        b.submit("vision", 8, 60)
+    assert len(b.alive) == 10
 
 
 def test_provider_outage_backs_off_and_falls_back_to_another_type():
@@ -125,7 +151,7 @@ def test_total_outage_keeps_jobs_queued_then_recovers():
     assert job.started_at >= T0 + 20 * MIN
 
 
-def test_node_that_never_boots_is_replaced_and_billed_to_overhead():
+def test_node_that_never_boots_is_replaced_and_its_cost_pooled():
     b = make(never_ready_rate=1.0)
     job, _ = b.submit("vision", 1, 30)
     b.provider.never_ready_rate = 0.0  # only the first launch is doomed
@@ -134,8 +160,8 @@ def test_node_that_never_boots_is_replaced_and_billed_to_overhead():
     b.run_until_idle()
     assert job.status == "succeeded"
     report = b.cost_report()
-    overhead = next(t for t in report["teams"] if t["team"] == OVERHEAD_TEAM)
-    assert overhead["total_cost"] == pytest.approx(10 / 60 * 1.0, abs=0.01)  # 10-min minimum
+    assert report["idle_pool_breakdown"]["failed_launch"] == pytest.approx(9 / 60, abs=0.01)
+    assert report["total_cost"] == pytest.approx(b.provider.invoice(), abs=0.02)
 
 
 # ------------------------------------------------------------ reaper
@@ -218,7 +244,7 @@ def test_fair_ordering_prefers_team_holding_fewer_gpus():
 
 
 def test_drain_frees_a_node_for_a_starved_team():
-    b = make(Config(max_nodes=2, reaper_idle_minutes=30))
+    b = make(Config(max_nodes=2, reaper_idle_minutes=30, high_reserved_slots=0))
     for _ in range(40):
         b.submit("vision", 8, 30)  # vision grabs both nodes and keeps refilling
     boot(b)
@@ -241,8 +267,50 @@ def test_cost_attribution_busy_idle_and_reconciles_with_provider_bill():
     assert by["nlp"]["gpu_hours"] == pytest.approx(2.0)
     assert by["vision"]["busy_cost"] == pytest.approx(1.0)
     assert by["nlp"]["busy_cost"] == pytest.approx(2.25)
-    assert by["vision"]["idle_cost"] > 0  # boot + reaper wait
+    # idle pool split pro-rata by GPU-hours: nlp used 2x vision's GPU-hours
+    assert by["vision"]["idle_cost"] > 0
+    assert by["nlp"]["idle_cost"] == pytest.approx(2 * by["vision"]["idle_cost"], abs=0.02)
+    assert sum(t["total_cost"] for t in rep["teams"]) == pytest.approx(rep["total_cost"], abs=0.02)
     assert rep["total_cost"] == pytest.approx(b.provider.invoice(), abs=0.02)
+
+
+def test_unused_gpus_on_a_busy_node_go_to_the_pool():
+    b = make()
+    b.submit("vision", 2, 60, run_minutes=60)  # gpu-m, half of it unused
+    b.run_until_idle()
+    rep = b.cost_report()
+    assert rep["teams"][0]["busy_cost"] == pytest.approx(2.25)  # 2 of 4 GPUs at 4.50/h
+    assert rep["idle_pool_breakdown"]["unused_gpus"] == pytest.approx(2.25)
+
+
+# ------------------------------------------------------------ interruptible
+def test_low_priority_runs_on_interruptible_and_is_requeued_on_reclaim():
+    b = make(reclaim_rate_per_hour=0.0)
+    job, _ = b.submit("vision", 1, 60, priority="low", run_minutes=60)
+    spot = next(iter(b.alive.values()))
+    assert spot.interruptible and spot.price_per_hour == pytest.approx(0.35)
+    boot(b)
+    assert job.status == "running" and job.node_id == spot.id
+    b.provider.force_reclaim(spot.id, b.now + 20 * MIN)
+    b.advance(18 * MIN + 1)
+    assert spot.draining and spot.reclaim_notice  # 2-minute notice
+    b.advance(2 * MIN)
+    assert spot.state == "reclaimed"
+    assert job.status in ("queued", "running") and job.interruptions == 1
+    b.run_until_idle()
+    assert job.status == "succeeded"
+    assert not b.nodes[job.node_id].interruptible  # second run is on-demand
+    assert len(job.runs) == 2
+    assert job.wait_seconds == job.first_started_at - job.submitted_at
+    rep = b.cost_report()
+    assert rep["teams"][0]["gpu_hours"] == pytest.approx(1 + 20 / 60, abs=0.01)  # lost run counts
+    assert rep["total_cost"] == pytest.approx(b.provider.invoice(), abs=0.02)
+
+
+def test_interruptible_can_be_disabled():
+    b = make(Config(interruptible_for_low=False))
+    b.submit("vision", 1, 60, priority="low")
+    assert not next(iter(b.alive.values())).interruptible
 
 
 def test_cost_report_window():

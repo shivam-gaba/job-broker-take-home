@@ -57,6 +57,9 @@ def job_dict(b: Broker, j: Job) -> dict:
         "wait_minutes": round(j.wait_seconds / 60, 1) if j.wait_seconds is not None else
         round((b.now - j.submitted_at) / 60, 1) if j.status == "queued" else None,
         "attempts": j.attempts, "reason": j.reason,
+        "first_started_at": to_iso(j.first_started_at), "interruptions": j.interruptions,
+        "runs_on_interruptible": b.wants_interruptible(j) if j.status == "queued" else
+        (b.nodes[j.node_id].interruptible if j.node_id else None),
     }
 
 
@@ -68,6 +71,9 @@ def node_dict(b: Broker, n: Node) -> dict:
         "ready_at": to_iso(n.ready_at), "ended_at": to_iso(n.ended_at),
         "idle_since": to_iso(n.idle_since) if n.state == "ready" and not n.job_ids else None,
         "draining": n.draining, "retiring": n.retire,
+        "interruptible": n.interruptible, "reserved_for_high": n.reserved,
+        "reclaim_notice": n.reclaim_notice,
+        "teams": sorted({b.jobs[j].team for j in n.job_ids}),
         "cost_so_far": round(((n.ended_at or b.now) - n.launched_at) * n.price_per_hour / 3600, 2),
     }
 
@@ -195,7 +201,11 @@ def _app_from_env() -> FastAPI:
     here = os.path.dirname(os.path.abspath(__file__))
     var = os.environ.get("BROKER_VAR_DIR", os.path.join(here, "..", "var"))
     os.makedirs(var, exist_ok=True)
-    cfg = Config(reaper_idle_minutes=float(os.environ.get("BROKER_REAPER_MINUTES", "10")))
+    isolated = tuple(t.strip() for t in os.environ.get("BROKER_ISOLATED_TEAMS", "").split(",")
+                     if t.strip())
+    cfg = Config(reaper_idle_minutes=float(os.environ.get("BROKER_REAPER_MINUTES", "10")),
+                 isolation=os.environ.get("BROKER_ISOLATE_ALL", "0") == "1",
+                 isolated_teams=isolated)
     ui = os.environ.get("BROKER_UI_DIR",
                         os.path.join(here, "..", "..", "frontend", "dist", "frontend", "browser"))
     return create_app(db_path=os.path.join(var, "broker.db"),

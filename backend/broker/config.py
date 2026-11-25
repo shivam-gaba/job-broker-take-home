@@ -17,8 +17,19 @@ class Config:
     ordering: str = "fair"
     aging_minutes: float = 60.0  # waiting this long bumps a job one priority level
     drain: bool = True  # only used with ordering == "fair"
-    # Security: a node only ever runs jobs of one team at a time.
-    isolation: bool = True
+    # Security. Default: teams share nodes. A team listed in `isolated_teams`
+    # never shares a node with another team at the same time (an empty node may
+    # be reused; nodes are assumed wiped between tenants). isolation=True
+    # isolates every team.
+    isolation: bool = False
+    isolated_teams: tuple = ()
+    # Node slots only base-priority-high jobs may launch into or use, so a high
+    # job never waits for the node cap. 0 disables.
+    high_reserved_slots: int = 1
+    # Low-priority jobs run on interruptible nodes (35% price). If reclaimed,
+    # their jobs are re-queued and rerun on on-demand nodes. A low job that has
+    # aged to a higher effective priority also moves to on-demand.
+    interruptible_for_low: bool = True
     # "demand": size a new node for the team's queued demand (pack small jobs)
     # "smallest": smallest node type that fits the job
     sizing: str = "demand"

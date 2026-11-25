@@ -24,19 +24,17 @@ from .provider import FakeProvider
 from .trace import TraceRow, load_trace
 
 VARIANTS: list[tuple[str, str, Config]] = [
-    ("fair", "Chosen policy: fair-share + aging + draining, isolation, demand sizing, reaper 10 min",
-     Config()),
+    ("fair", "Chosen policy: fair-share + aging + draining; teams share nodes; low priority on "
+             "interruptible; 1 slot reserved for high; demand sizing; reaper 10 min", Config()),
     ("fifo", "Alternative: strict priority then FIFO, no draining (everything else equal)",
      Config(ordering="fifo", drain=False)),
-    ("fair-shared", "Chosen policy without team isolation (prices the security rule)",
-     Config(isolation=False)),
+    ("fair-isolated", "Every team isolated (prices the Security request)", Config(isolation=True)),
+    ("fair-no-spot", "No interruptible nodes", Config(interruptible_for_low=False)),
+    ("fair-no-reserve", "No reserved high-priority slot", Config(high_reserved_slots=0)),
     ("fair-reaper0", "Reaper N=0 (kill as soon as idle, after the paid 10 min)",
      Config(reaper_idle_minutes=0)),
     ("fair-reaper30", "Reaper N=30", Config(reaper_idle_minutes=30)),
-    ("fair-smallest", "Smallest node that fits instead of demand sizing",
-     Config(sizing="smallest")),
     ("fair-no-rightsize", "Reuse any empty node, however oversized", Config(right_size=False)),
-    ("fair-no-upgrade", "No slot upgrade of small nodes at the cap", Config(upgrade=False)),
 ]
 
 
@@ -52,10 +50,14 @@ def run_once(rows: list[TraceRow], config: Config, seed: int) -> dict:
     assert not unfinished, f"{len(unfinished)} jobs never finished"
     report = broker.cost_report()
     waits: dict[str, list[float]] = defaultdict(list)
+    high_waits: list[float] = []
     for j in broker.jobs.values():
         waits[j.team].append(j.wait_seconds / 60)
+        if j.priority == "high":
+            high_waits.append(j.wait_seconds / 60)
     return {
         "waits": waits,
+        "high_waits": high_waits,
         "total_cost": report["total_cost"],
         "idle_cost": report["total_idle_cost"],
         "cost_by_team": {t["team"]: t["total_cost"] for t in report["teams"]},
@@ -105,7 +107,9 @@ def summarize(runs: list[dict]) -> dict:
         for t, c in r["idle_by_team"].items():
             idle_by_team[t] += c / n
     costs = [r["total_cost"] for r in runs]
+    high = [w for r in runs for w in r["high_waits"]]
     return {
+        "high_p90": percentile(high, 90), "high_within_10": sum(w <= 10 for w in high) / len(high),
         "teams": teams,
         "cost_mean": sum(costs) / n, "cost_min": min(costs), "cost_max": max(costs),
         "idle_mean": sum(r["idle_cost"] for r in runs) / n,
@@ -135,33 +139,35 @@ def render(trace_report: dict, results: list[tuple[str, str, dict]], seeds: int,
     w(f"* jobs per team: {', '.join(f'{k}={v}' for k, v in sorted(trace_report['per_team'].items()))}\n")
 
     w("## Policy comparison\n")
-    w("| variant | total cost (mean, min-max) | idle cost | p50 wait | p90 wait | p99 wait | started <=10 min | launches | capacity errors | boot timeouts | drains |")
-    w("|---|---|---|---|---|---|---|---|---|---|---|")
+    w("| variant | total cost (mean, min-max) | idle pool | p50 wait | p90 wait | p99 wait | started <=10 min | high p90 | launches | capacity errors | reclaims | lost GPU-h | drains |")
+    w("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for name, _desc, s in results:
         a = s["teams"]["ALL"]
         st = s["stats"]
         w(f"| {name} | {s['cost_mean']:.0f} ({s['cost_min']:.0f}-{s['cost_max']:.0f}) | "
           f"{s['idle_mean']:.0f} ({s['idle_mean'] / s['cost_mean']:.0%}) | "
           f"{a['p50']:.1f} | {a['p90']:.1f} | {a['p99']:.1f} | {a['within_10']:.0%} | "
+          f"{s['high_p90']:.1f} | "
           f"{st.get('launches', 0):.0f} | {st.get('capacity_errors', 0):.0f} | "
-          f"{st.get('boot_timeouts', 0):.0f} | {st.get('drains', 0):.0f} |")
+          f"{st.get('reclaims', 0):.1f} | {st.get('lost_gpu_seconds', 0) / 3600:.1f} | "
+          f"{st.get('drains', 0):.0f} |")
     w("")
     for name, desc, _ in results:
         w(f"* **{name}**: {desc}")
-    w("\nWait times are in minutes (submit to start). Costs are in the provider's currency.\n")
+    w("\nWait times are in minutes (submit to first start). Idle pool = everything billed that "
+      "is not a job's own GPUs (boot, idle, unused GPUs on busy nodes, 10-min minimum, failed "
+      "launches), shared pro-rata by GPU-hours. Costs are in the provider's currency.\n")
 
     for name, desc, s in results[:2]:
         w(f"## Per-team wait (minutes) and cost: `{name}`\n")
-        w("| team | jobs | p50 | p90 | p99 | max | started <=10 min | cost | of which idle |")
+        w("| team | jobs | p50 | p90 | p99 | max | started <=10 min | cost | of which idle share |")
         w("|---|---|---|---|---|---|---|---|---|")
         for team, t in s["teams"].items():
             cost = s["cost_by_team"].get(team, s["cost_mean"] if team == "ALL" else 0)
             idle = s["idle_by_team"].get(team, s["idle_mean"] if team == "ALL" else 0)
             w(f"| {team} | {t['jobs']} | {t['p50']:.1f} | {t['p90']:.1f} | {t['p99']:.1f} | "
               f"{t['max']:.1f} | {t['within_10']:.0%} | {cost:.0f} | {idle:.0f} |")
-        overhead = s["cost_by_team"].get("_overhead", 0)
-        w(f"\n`_overhead` (failed launches, provider's fault): {overhead:.1f}. "
-          f"Ledger reconciles with provider invoice on every seed: {s['reconciled']}.\n")
+        w(f"\nLedger reconciles with provider invoice on every seed: {s['reconciled']}.\n")
     return "\n".join(out)
 
 

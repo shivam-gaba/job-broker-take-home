@@ -7,6 +7,9 @@ Behaves like the provider described in the brief:
   * a node is ready 4-8 minutes after launch; ~3% never become ready and are
     reported failed 15 minutes after launch
   * billed per second from launch, with a 10 minute minimum per node
+  * interruptible variants at 35% of the price; the provider reclaims them
+    with 2 minutes' notice. Reclaims are a Poisson process with a hazard of
+    5% per node-hour, i.e. roughly 5% of interruptible node-hours are lost.
 
 The provider is treated as an external system: it persists its own state to
 its own file (atomic JSON write) independently of the broker database, so
@@ -42,6 +45,13 @@ NODE_TYPES: dict[str, NodeType] = {
 
 MIN_BILLED_SECONDS = 10 * 60
 NEVER_READY_REPORT_SECONDS = 15 * 60
+INTERRUPTIBLE_PRICE_FACTOR = 0.35
+RECLAIM_NOTICE_SECONDS = 2 * 60
+
+
+def node_price(node_type: str, interruptible: bool) -> float:
+    base = NODE_TYPES[node_type].price_per_hour
+    return base * INTERRUPTIBLE_PRICE_FACTOR if interruptible else base
 
 
 @dataclass
@@ -52,32 +62,40 @@ class ProviderNode:
     ready_at: int  # when it becomes ready (meaningless if doomed)
     doomed: bool  # never becomes ready
     terminated_at: Optional[int] = None
+    interruptible: bool = False
+    reclaim_at: Optional[int] = None  # interruptible only
 
     @property
     def failed_at(self) -> int:
         return self.launched_at + NEVER_READY_REPORT_SECONDS
 
+    @property
+    def price_per_hour(self) -> float:
+        return node_price(self.type, self.interruptible)
+
     def state(self, now: int) -> str:
         if self.terminated_at is not None and self.terminated_at <= now:
             return "terminated"
+        if self.reclaim_at is not None and now >= self.reclaim_at:
+            return "reclaimed"
         if self.doomed:
             return "failed" if now >= self.failed_at else "booting"
         return "ready" if now >= self.ready_at else "booting"
 
-    def billing_end(self) -> Optional[int]:
-        """When billing stops, or None while still billing."""
-        if self.terminated_at is not None:
-            return self.terminated_at
-        return None
+    def billing_end(self, now: int) -> Optional[int]:
+        """When billing stopped, or None while still billing."""
+        ends = [t for t in (self.terminated_at, self.reclaim_at,
+                            self.failed_at if self.doomed else None)
+                if t is not None and t <= now]
+        return min(ends) if ends else None
 
     def billed_cost(self, now: int) -> float:
-        end = self.billing_end()
+        end = self.billing_end(now)
         if end is None:
-            end = self.failed_at if self.doomed and now >= self.failed_at else now
-        seconds = end - self.launched_at
-        if self.terminated_at is not None or (self.doomed and now >= self.failed_at):
-            seconds = max(seconds, MIN_BILLED_SECONDS)
-        return seconds * NODE_TYPES[self.type].price_per_hour / 3600
+            seconds = now - self.launched_at
+        else:
+            seconds = max(end - self.launched_at, MIN_BILLED_SECONDS)
+        return seconds * self.price_per_hour / 3600
 
 
 class FakeProvider:
@@ -90,6 +108,7 @@ class FakeProvider:
         outage_start_prob: float = 0.03,
         outage_fail_prob: float = 0.9,
         outage_minutes: tuple[int, int] = (10, 60),
+        reclaim_rate_per_hour: float = 0.05,
     ) -> None:
         self.clock = clock
         self.path = path
@@ -97,6 +116,7 @@ class FakeProvider:
         self.outage_start_prob = outage_start_prob
         self.outage_fail_prob = outage_fail_prob
         self.outage_minutes = outage_minutes
+        self.reclaim_rate_per_hour = reclaim_rate_per_hour
         self.rng = random.Random(seed)
         self.nodes: dict[str, ProviderNode] = {}
         self.outage_until: dict[str, int] = {}
@@ -108,21 +128,22 @@ class FakeProvider:
             self._load()
 
     # ---- provider API -------------------------------------------------
-    def launch_node(self, node_type: str) -> str:
+    def launch_node(self, node_type: str, interruptible: bool = False) -> str:
         if node_type not in NODE_TYPES:
             raise ValueError(f"unknown node type {node_type}")
         now = self.clock.now
         self.launch_calls += 1
+        market = capacity_key(node_type, interruptible)  # outages are per market
         try:
-            if now < self.forced_outage_until.get(node_type, 0):
-                raise CapacityUnavailable(node_type)
-            if now < self.outage_until.get(node_type, 0):
+            if now < self.forced_outage_until.get(market, 0):
+                raise CapacityUnavailable(market)
+            if now < self.outage_until.get(market, 0):
                 if self.rng.random() < self.outage_fail_prob:
-                    raise CapacityUnavailable(node_type)
+                    raise CapacityUnavailable(market)
             elif self.rng.random() < self.outage_start_prob:
                 lo, hi = self.outage_minutes
-                self.outage_until[node_type] = now + self.rng.randint(lo, hi) * 60
-                raise CapacityUnavailable(node_type)
+                self.outage_until[market] = now + self.rng.randint(lo, hi) * 60
+                raise CapacityUnavailable(market)
         except CapacityUnavailable:
             self.capacity_errors += 1
             self._save()
@@ -134,7 +155,10 @@ class FakeProvider:
             launched_at=now,
             ready_at=now + self.rng.randint(4 * 60, 8 * 60),
             doomed=self.rng.random() < self.never_ready_rate,
+            interruptible=interruptible,
         )
+        if interruptible and self.reclaim_rate_per_hour > 0:
+            node.reclaim_at = now + max(1, int(self.rng.expovariate(self.reclaim_rate_per_hour / 3600)))
         self.nodes[node.id] = node
         self._save()
         return node.id
@@ -143,17 +167,18 @@ class FakeProvider:
         node = self.nodes[node_id]
         now = self.clock.now
         if node.terminated_at is None:
-            # a doomed node stops billing when the provider reports the failure
-            if node.doomed and now >= node.failed_at:
-                node.terminated_at = node.failed_at
-            else:
-                node.terminated_at = now
+            # billing already stopped if the provider failed or reclaimed it
+            node.terminated_at = node.billing_end(now) or now
             self._save()
 
     def describe_node(self, node_id: str) -> dict:
         node = self.nodes[node_id]
-        return {"id": node.id, "type": node.type, "state": node.state(self.clock.now),
-                "ready_at": node.ready_at, "launched_at": node.launched_at}
+        now = self.clock.now
+        return {"id": node.id, "type": node.type, "state": node.state(now),
+                "ready_at": node.ready_at, "launched_at": node.launched_at,
+                "interruptible": node.interruptible, "reclaim_at": node.reclaim_at,
+                "reclaim_notice": node.reclaim_at is not None
+                and now >= node.reclaim_at - RECLAIM_NOTICE_SECONDS}
 
     def list_alive(self) -> list[str]:
         now = self.clock.now
@@ -168,19 +193,25 @@ class FakeProvider:
         now = self.clock.now
         times = []
         for n in self.nodes.values():
-            if n.state(now) != "booting":
-                continue
-            times.append(n.failed_at if n.doomed else n.ready_at)
-        return min(times) if times else None
+            st = n.state(now)
+            if st == "booting":
+                times.append(n.failed_at if n.doomed else n.ready_at)
+            if st in ("booting", "ready") and n.reclaim_at is not None:
+                times += [n.reclaim_at - RECLAIM_NOTICE_SECONDS, n.reclaim_at]
+        future = [t for t in times if t > now]
+        return min(future) if future else None
 
     def invoice(self, now: Optional[int] = None) -> float:
         now = self.clock.now if now is None else now
         return sum(n.billed_cost(now) for n in self.nodes.values())
 
     # ---- test helpers -------------------------------------------------
-    def force_outage(self, node_type: str, until: int) -> None:
+    def force_outage(self, node_type: str, until: int, interruptible: bool = False) -> None:
         """Every launch of node_type fails until `until` (deterministic)."""
-        self.forced_outage_until[node_type] = until
+        self.forced_outage_until[capacity_key(node_type, interruptible)] = until
+
+    def force_reclaim(self, node_id: str, at: int) -> None:
+        self.nodes[node_id].reclaim_at = at
 
     # ---- persistence --------------------------------------------------
     def _save(self) -> None:
@@ -210,6 +241,10 @@ class FakeProvider:
         self.launch_calls = state.get("launch_calls", 0)
         self.capacity_errors = state.get("capacity_errors", 0)
         self.rng.setstate(_rng_from_json(state["rng"]))
+
+
+def capacity_key(node_type: str, interruptible: bool) -> str:
+    return f"{node_type}/spot" if interruptible else node_type
 
 
 def _rng_to_json(state):

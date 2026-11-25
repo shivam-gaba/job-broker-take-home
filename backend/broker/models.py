@@ -6,7 +6,7 @@ from typing import Optional
 PRIORITIES = {"low": 0, "normal": 1, "high": 2}
 VALID_GPUS = (1, 2, 4, 8)
 TERMINAL = ("succeeded", "failed", "cancelled")
-OVERHEAD_TEAM = "_overhead"  # failed launches: provider's fault, owned by the platform
+OVERHEAD_TEAM = "_overhead"  # label for orphan nodes found at restart (no team launched them)
 
 
 @dataclass
@@ -28,12 +28,19 @@ class Job:
     node_id: Optional[str] = None
     attempts: int = 0
     reason: Optional[str] = None
+    first_started_at: Optional[int] = None
+    # finished run intervals [start, end, node_id]; more than one if the job
+    # was re-queued after its interruptible node was reclaimed
+    runs: list = field(default_factory=list)
+    interruptions: int = 0
+    no_interruptible: bool = False  # interrupted once: next run goes on-demand
 
     @property
     def wait_seconds(self) -> Optional[int]:
-        if self.started_at is None:
+        """Submit to first start (what an ML engineer experiences)."""
+        if self.first_started_at is None:
             return None
-        return self.started_at - self.submitted_at
+        return self.first_started_at - self.submitted_at
 
     @property
     def expected_end(self) -> Optional[int]:
@@ -50,7 +57,7 @@ class Node:
     gpus: int
     price_per_hour: float
     launched_at: int
-    team: str  # team currently accountable for the node's cost
+    team: str  # team the node was launched for / first team on it when it went busy
     state: str = "booting"  # booting | ready | terminated | failed
     ready_at: Optional[int] = None
     ended_at: Optional[int] = None
@@ -60,6 +67,9 @@ class Node:
     draining: bool = False
     drain_for: Optional[str] = None
     retire: bool = False  # terminate as soon as empty (slot upgrade)
+    interruptible: bool = False
+    reserved: bool = False  # launched into the high-priority reserved slot
+    reclaim_notice: bool = False
     # currently open cost segment
     seg_kind: str = "boot"
     seg_start: int = 0
@@ -75,9 +85,11 @@ class Node:
 
 @dataclass
 class Segment:
-    """A slice of a node's billed life attributed to one team.
+    """A slice of a node's billed life.
 
     kind: boot | busy | idle | failed_launch | minimum
+    `team` is informational (the node's launch/first team); cost attribution
+    to teams is done pro-rata in Broker.cost_report.
     For kind == "minimum" (10-minute minimum top-up) start == end and the
     extra billed seconds are in `extra_seconds`.
     """
