@@ -59,6 +59,7 @@ class Node:
     idle_since: Optional[int] = None
     draining: bool = False
     drain_for: Optional[str] = None
+    retire: bool = False  # terminate as soon as empty (slot upgrade)
     # currently open cost segment
     seg_kind: str = "boot"
     seg_start: int = 0

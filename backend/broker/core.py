@@ -248,7 +248,9 @@ class Broker:
             demand = pending[job.team if cfg.isolation else "*"]
             pending[job.team if cfg.isolation else "*"] -= job.gpus
 
-            node = self._find_ready_node(job)
+            max_gpus = (NODE_TYPES[self._type_candidates(job.gpus, demand)[0]].gpus
+                        if cfg.right_size else None)
+            node = self._find_ready_node(job, max_empty_gpus=max_gpus)
             if node is not None:
                 self._start(job, node)
                 alloc[job.team] += job.gpus
@@ -258,21 +260,32 @@ class Broker:
                 planned[booting.id] -= job.gpus
                 alloc[job.team] += job.gpus
                 continue
-            if cap_blocked:
-                # don't let a lower-ranked job take a node slot a higher one needs
-                blocked_teams.append(job.team)
-                continue
-            result = self._launch_for(job, demand)
+            result = "cap" if cap_blocked else self._launch_for(job, demand)
             if isinstance(result, Node):
                 planned[result.id] = result.gpus - job.gpus
                 alloc[job.team] += job.gpus
-            elif result == "cap":
+                continue
+            # cannot launch: an oversized empty node now beats waiting
+            node = self._find_ready_node(job) if cfg.right_size else None
+            if node is not None:
+                self._start(job, node)
+                alloc[job.team] += job.gpus
+                continue
+            if result == "cap":
+                # don't let a lower-ranked job take a node slot a higher one needs
                 cap_blocked = True
                 blocked_teams.append(job.team)
 
         if cfg.ordering == "fair" and cfg.drain:
             for team in dict.fromkeys(blocked_teams):
                 self._maybe_drain(team)
+        if cfg.upgrade and cap_blocked:
+            backlog: dict[str, int] = defaultdict(int)
+            for j in self.queue.values():
+                backlog[j.team if cfg.isolation else "*"] += j.gpus
+            for team in dict.fromkeys(blocked_teams):
+                self._maybe_upgrade(team if cfg.isolation else None,
+                                    backlog[team if cfg.isolation else "*"])
 
     def effective_priority(self, job: Job) -> int:
         base = PRIORITIES[job.priority]
@@ -314,7 +327,10 @@ class Broker:
     def _can_share(self, node: Node, team: str) -> bool:
         return not self.config.isolation or not node.job_ids or node.team == team
 
-    def _find_ready_node(self, job: Job) -> Optional[Node]:
+    def _find_ready_node(self, job: Job, max_empty_gpus: Optional[int] = None) -> Optional[Node]:
+        """Best ready node for `job`. Empty nodes larger than `max_empty_gpus`
+        are skipped (right-sizing: a 1-GPU job should not hold an 8-GPU node
+        when a right-sized one is a few minutes' boot away)."""
         best, best_key = None, None
         for n in self.alive.values():
             if n.state != "ready" or n.draining or n.free_gpus < job.gpus:
@@ -324,6 +340,8 @@ class Broker:
             if (not n.job_ids and n.team != job.team
                     and self._waiting_min_gpus.get(n.team, 99) <= n.gpus):
                 continue  # reserved for the team that launched it
+            if not n.job_ids and max_empty_gpus is not None and n.gpus > max_empty_gpus:
+                continue
             # prefer packing onto a busy node (best fit), then the smallest empty node
             key = (0, n.free_gpus - job.gpus) if n.job_ids else (1, n.gpus)
             if best_key is None or key < best_key:
@@ -385,7 +403,7 @@ class Broker:
         return "provider"
 
     def _eviction_candidate(self) -> Optional[Node]:
-        """An empty ready node that didn't fit the job we need a slot for."""
+        """An empty ready node that didn't suit the job we need a slot for."""
         idle = [n for n in self.alive.values() if n.state == "ready" and not n.job_ids]
         return min(idle, key=lambda n: n.idle_since) if idle else None
 
@@ -413,6 +431,25 @@ class Broker:
         node.draining, node.drain_for = True, team
         self.stats["drains"] += 1
 
+    def _maybe_upgrade(self, team: Optional[str], backlog: int) -> None:
+        """Node slots are the scarce thing at the cap. If a team's backlog would
+        fill a whole gpu-l, stop refilling one of its smaller nodes; when it
+        empties it is terminated and the slot is relaunched as a gpu-l."""
+        largest = NODE_TYPES[TYPE_ORDER[-1]].gpus
+        if backlog < largest:
+            return
+        mine = [n for n in self.alive.values() if team is None or n.team == team]
+        if any(n.retire for n in mine):
+            return
+        cands = [n for n in mine if n.state == "ready" and n.gpus < largest
+                 and not n.draining and n.job_ids]
+        if not cands:
+            return
+        node = min(cands, key=lambda n: (n.gpus, max(self.jobs[j].expected_end
+                                                     for j in n.job_ids)))
+        node.draining = node.retire = True
+        self.stats["upgrades"] += 1
+
     # ================================================== state transitions
     def _start(self, job: Job, node: Node) -> None:
         now = self.now
@@ -436,6 +473,9 @@ class Broker:
             self._phase(node, "idle", node.team, at)
             node.idle_since = at
             node.draining, node.drain_for = False, None
+            if node.retire:
+                self.stats["retired"] += 1
+                self._terminate(node)
 
     def _node_ready(self, node: Node, at: int) -> None:
         node.state, node.ready_at, node.idle_since = "ready", at, at

@@ -22,6 +22,13 @@ class Config:
     # "demand": size a new node for the team's queued demand (pack small jobs)
     # "smallest": smallest node type that fits the job
     sizing: str = "demand"
+    # Don't put a job on an empty node bigger than the one we would launch for
+    # it, unless launching is impossible right now. Boot (4-8 min) still fits
+    # the 10-minute start target; an oversized node bills its full price.
+    right_size: bool = True
+    # At the node cap, replace a team's small nodes with gpu-l when its backlog
+    # would fill one (more GPUs per scarce node slot).
+    upgrade: bool = True
     # A healthy node is ready within 8 minutes; past this we assume it is one of
     # the ~3% that never come up, terminate it and launch a replacement instead
     # of waiting for the provider's 15-minute failure report.
