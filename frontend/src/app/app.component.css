@@ -58,3 +58,7 @@ tfoot td { font-weight: 600; border-bottom: none; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; margin: 10px 0 0; white-space: normal; }
+.pill.spot { background: var(--warn-bg); color: var(--warn); }
+.pill.high { background: var(--bad-bg); color: var(--bad); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pool { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; font-size: 12px; }

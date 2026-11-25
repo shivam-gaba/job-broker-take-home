@@ -84,6 +84,15 @@
             <strong>{{ n.id }}</strong>
             <span class="pill">{{ n.type }}</span>
             <span class="pill status">{{ nodeStatus(n) }}</span>
+            @if (n.interruptible) {
+              <span class="pill spot" title="Interruptible: 35% price, can be reclaimed with 2 min notice">spot</span>
+            }
+            @if (n.reserved_for_high) {
+              <span class="pill high" title="Reserved slot: only high-priority jobs">high only</span>
+            }
+            @if (n.reclaim_notice) {
+              <span class="pill bad">reclaim notice</span>
+            }
           </div>
           <div class="gpus">
             @for (used of gpuSlots(n); track $index) {
@@ -91,7 +100,7 @@
             }
           </div>
           <div class="node-meta">
-            <span>team <strong>{{ n.team }}</strong></span>
+            <span>teams <strong>{{ n.teams.length ? n.teams.join(', ') : '–' }}</strong></span>
             <span>{{ n.used_gpus }}/{{ n.gpus }} GPUs</span>
             <span>{{ n.price_per_hour | number: '1.2-2' }}/h · so far {{ n.cost_so_far | number: '1.2-2' }}</span>
             @if (n.idle_since) {
@@ -122,6 +131,7 @@
               <td>{{ j.gpus }}</td>
               <td>{{ j.estimated_minutes }}m</td>
               <td>
+                @if (j.runs_on_interruptible) { <span class="pill spot" title="Will run on an interruptible node">spot</span> }
                 <span class="prio" [class]="'prio ' + j.priority">{{ j.priority }}</span>
                 @if (j.effective_priority !== null && priorityLabel(j.effective_priority) !== j.priority) {
                   <span class="muted" title="aged after waiting">→ {{ priorityLabel(j.effective_priority) }}</span>
@@ -152,8 +162,8 @@
         </thead>
         <tbody>
           @for (t of teamsInCost(); track t.team) {
-            <tr [title]="'boot/idle/minimum breakdown: ' + (t.breakdown | json)">
-              <td>{{ t.team === '_overhead' ? 'overhead (failed launches)' : t.team }}</td>
+            <tr>
+              <td>{{ t.team === '_unallocated' ? 'unallocated (no GPU use in window)' : t.team }}</td>
               <td>{{ t.jobs }}</td>
               <td>{{ t.gpu_hours | number: '1.2-2' }}</td>
               <td>{{ t.busy_cost | number: '1.2-2' }}</td>
@@ -178,9 +188,17 @@
       </table>
       <p class="muted small">
         Window {{ c.start | date: 'MMM d HH:mm' : 'UTC' }} – {{ c.end | date: 'MMM d HH:mm' : 'UTC' }} UTC.
-        Idle cost (boot, idle, 10-minute minimum) is charged to the team the node was serving; nodes never mix teams.
-        Provider invoice to date: {{ c.provider_invoice_to_date | number: '1.2-2' }}.
+        Busy cost = the GPUs each job used, at its node's per-GPU price. Everything else is a shared idle pool,
+        split across teams by their share of GPU-hours. Provider invoice to date: {{ c.provider_invoice_to_date | number: '1.2-2' }}.
       </p>
+      @if ((c.idle_pool_breakdown | keyvalue).length) {
+        <div class="pool">
+          <span class="muted">Idle pool:</span>
+          @for (k of c.idle_pool_breakdown | keyvalue; track k.key) {
+            <span class="pill">{{ poolLabel(k.key) }} {{ k.value | number: '1.2-2' }}</span>
+          }
+        </div>
+      }
     }
   </section>
 
@@ -197,7 +215,10 @@
             <td class="mono">{{ j.id }}</td>
             <td>{{ j.team }}</td>
             <td>{{ j.gpus }}</td>
-            <td><span class="status-pill" [class]="'status-pill ' + j.status">{{ j.status }}</span></td>
+            <td>
+              <span class="status-pill" [class]="'status-pill ' + j.status">{{ j.status }}</span>
+              @if (j.interruptions) { <span class="pill bad" [title]="j.reason ?? ''">reclaimed ×{{ j.interruptions }}</span> }
+            </td>
             <td>{{ j.submitted_at | date: 'MMM d HH:mm' : 'UTC' }}</td>
             <td>{{ j.wait_minutes ?? '–' }}{{ j.wait_minutes !== null ? 'm' : '' }}</td>
             <td class="mono">{{ j.node_id ?? '–' }}</td>

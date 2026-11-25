@@ -19,6 +19,9 @@ export interface Job {
   wait_minutes: number | null;
   attempts: number;
   reason: string | null;
+  first_started_at: string | null;
+  interruptions: number;
+  runs_on_interruptible: boolean | null;
 }
 
 export interface BrokerNode {
@@ -35,6 +38,10 @@ export interface BrokerNode {
   idle_since: string | null;
   draining: boolean;
   retiring: boolean;
+  interruptible: boolean;
+  reserved_for_high: boolean;
+  reclaim_notice: boolean;
+  teams: string[];
   cost_so_far: number;
 }
 
@@ -45,7 +52,6 @@ export interface TeamCost {
   idle_cost: number;
   total_cost: number;
   idle_share: number;
-  breakdown: Record<string, number>;
   jobs: number;
 }
 
@@ -56,6 +62,7 @@ export interface CostReport {
   total_cost: number;
   total_idle_cost: number;
   total_gpu_hours: number;
+  idle_pool_breakdown: Record<string, number>;
   provider_invoice_to_date: number;
 }
 

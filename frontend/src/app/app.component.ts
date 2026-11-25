@@ -1,6 +1,6 @@
 import { Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { DatePipe, DecimalPipe, JsonPipe, KeyValuePipe, PercentPipe } from '@angular/common';
+import { DatePipe, DecimalPipe, KeyValuePipe, PercentPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpErrorResponse } from '@angular/common/http';
 import { Subject, forkJoin, interval, startWith, switchMap, catchError, of, merge } from 'rxjs';
@@ -11,7 +11,7 @@ const PRIORITY_LABEL = ['low', 'normal', 'high'];
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [FormsModule, DatePipe, DecimalPipe, PercentPipe, KeyValuePipe, JsonPipe],
+  imports: [FormsModule, DatePipe, DecimalPipe, PercentPipe, KeyValuePipe],
   templateUrl: './app.component.html',
   styleUrl: './app.component.css',
 })
@@ -135,6 +135,10 @@ export class AppComponent implements OnInit {
     if (n.retiring) return 'retiring';
     if (n.draining) return 'draining';
     return n.job_ids.length ? 'busy' : 'idle';
+  }
+
+  poolLabel(kind: string): string {
+    return ({ boot: 'boot', idle: 'idle', unused_gpus: 'unused GPUs', minimum: '10-min minimum', failed_launch: 'failed launches' } as Record<string, string>)[kind] ?? kind;
   }
 
   gpuSlots(n: BrokerNode): boolean[] {
