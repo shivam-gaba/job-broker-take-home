@@ -201,5 +201,20 @@ Other variants (full table in `docs/replay_results.md`):
 - **Persistence scale.** The full snapshot diff is O(jobs) per request. That's fine at this scale; beyond it, track dirty rows explicitly and archive old jobs.
 
 ## AI usage and time
-- **Tools:** Claude Code (Anthropic Claude). It was used to design and write the code, tests and documentation together with me. I reviewed the decisions; the replay-driven fixes (slot upgrade, right-sizing) came from inspecting simulation output together.
-- **Time:** _started: …, finished: …, roughly … hours of active work, including time with AI tools._ (fill in)
+- **Tools:** Claude Code (Anthropic Claude Opus 5.5) in VS Code, used throughout.
+- **What the AI did:** it wrote most of the code, the tests and the documentation, and ran the replay experiments.
+- **What I did:** I made the key policy decisions when it put them to me as explicit choices:
+  - isolation opt-in per team rather than a hard rule;
+  - pro-rata idle cost;
+  - a reserved slot for high priority;
+  - interruptible nodes for low-priority jobs, limited to estimates of 120 minutes or less;
+  - keeping fair-share with draining and a reaper of 10 minutes;
+  - the data-cleaning rules.
+
+  I also reviewed the results, ran the UI locally and published the repository.
+- **Fixes found by simulation:** the slot upgrade and right-sizing fixes came from inspecting the simulation output. So did the decision to cap interruptible use at 120 minutes, after the replay showed long overrunning jobs causing most of the lost work.
+- **Time (IST, UTC+5:30):** the assignment was received on 23 Nov 2026 at 22:37. I worked on 26 Nov 2026:
+  - about 03:10–04:10 building it (first commit 03:15, last code commit 04:05);
+  - about 10:15–10:30 running the UI locally and publishing.
+
+  That is roughly **1¼ hours of active work in total, including the time with AI tools**, plus reading the brief beforehand. I submitted after the two-day window.
